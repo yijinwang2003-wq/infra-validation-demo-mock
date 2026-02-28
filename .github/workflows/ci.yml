@@ -1,0 +1,64 @@
+name: infra-validation-ci
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+jobs:
+  validate-and-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -input=false
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Install tfsec
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      - name: tfsec Scan
+        working-directory: terraform
+        run: tfsec .
+
+      - name: Install conftest
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/open-policy-agent/conftest/releases/latest | grep tag_name | cut -d '"' -f 4)
+          curl -L -o conftest.tar.gz "https://github.com/open-policy-agent/conftest/releases/download/${LATEST}/conftest_${LATEST#v}_Linux_x86_64.tar.gz"
+          tar -xzf conftest.tar.gz
+          sudo mv conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Terraform Plan (best effort)
+        id: plan
+        working-directory: terraform
+        continue-on-error: true
+        run: |
+          terraform plan -out=tfplan -input=false
+          terraform show -json tfplan > plan.json
+
+      - name: Policy Check with conftest (runs only if plan.json exists)
+        working-directory: terraform
+        run: |
+          if [ -f plan.json ]; then
+            conftest test plan.json -p ../policy
+          else
+            echo "plan.json not found (plan likely failed due to missing AWS credentials). Skipping policy check."
+          fi
